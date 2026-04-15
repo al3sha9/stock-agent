@@ -7,10 +7,28 @@ from telegram.helpers import escape_markdown
 from loguru import logger
 from typing import Optional
 
+import functools
 from app.core.config import get_settings
 from app.db.session import AsyncSessionLocal
 from app.db import crud
 from app.schemas.stock import WatchlistCreate
+
+def verify_user(func):
+    """
+    Decorator to gate interactive Telegram commands.
+    Requires an active User record in the database.
+    """
+    @functools.wraps(func)
+    async def wrapper(self, update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        user_id = str(update.effective_chat.id)
+        async with AsyncSessionLocal() as db:
+            user = await crud.get_user_by_telegram_id(db, user_id)
+            if not user or not user.is_active:
+                logger.warning(f"Unauthorized access attempt by chat ID: {user_id}")
+                await update.message.reply_text("Access Denied. Please contact the administrator to activate your account.")
+                return
+        return await func(self, update, context, *args, **kwargs)
+    return wrapper
 
 settings = get_settings()
 
@@ -72,8 +90,23 @@ class TelegramNotifier:
             "\u2022 `/list` \\- See your personal watchlist\n"
             "\u2022 `/status TICKER` \\- Immediate AI analysis"
         )
+        
+        user_id = str(update.effective_chat.id)
+        async with AsyncSessionLocal() as db:
+            user = await crud.get_user_by_telegram_id(db, user_id)
+            if not user:
+                # Auto-register as dormant
+                await crud.create_user(db, chat_id=user_id, is_active=False)
+                logger.info(f"New user registered as dormant: {user_id}")
+                await update.message.reply_text("Welcome. Your account is pending activation. Please contact the administrator.")
+                return
+            elif not user.is_active:
+                await update.message.reply_text("Welcome back. Your account is still pending activation.")
+                return
+                
         await update.message.reply_text(welcome_text, parse_mode=ParseMode.MARKDOWN_V2)
 
+    @verify_user
     async def add_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handler for /add TICKER PRICE."""
         try:
@@ -122,6 +155,7 @@ class TelegramNotifier:
             logger.error(f"Error in /add: {e}")
             await update.message.reply_text(f"❌ Error adding stock: {str(e)}")
 
+    @verify_user
     async def remove_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handler for /remove TICKER."""
         try:
@@ -143,6 +177,7 @@ class TelegramNotifier:
             logger.error(f"Error in /remove: {e}")
             await update.message.reply_text(f"❌ Error removing stock: {str(e)}")
 
+    @verify_user
     async def list_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handler for /list."""
         try:
@@ -164,6 +199,7 @@ class TelegramNotifier:
             logger.error(f"Error in /list: {e}")
             await update.message.reply_text("\u274c Error listing watchlist\\.")  
 
+    @verify_user
     async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handler for /status TICKER."""
         try:

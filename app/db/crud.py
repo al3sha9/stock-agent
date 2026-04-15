@@ -4,6 +4,7 @@ from typing import List, Optional
 import uuid
 
 from app.db.models import Watchlist, TriggerEvent
+from app.models.user import User
 from app.schemas.stock import WatchlistCreate, WatchlistUpdate
 
 async def get_active_watchlist(db: AsyncSession) -> List[Watchlist]:
@@ -134,3 +135,18 @@ async def update_trigger_event_analysis(
         await db.commit()
         await db.refresh(event)
     return event
+
+async def get_user_by_telegram_id(db: AsyncSession, chat_id: str) -> Optional[User]:
+    """Retrieve a User by their telegram_chat_id."""
+    result = await db.execute(
+        select(User).where(User.telegram_chat_id == chat_id)
+    )
+    return result.scalars().first()
+
+async def create_user(db: AsyncSession, chat_id: str, is_active: bool = False) -> User:
+    """Create a new User record."""
+    user = User(telegram_chat_id=chat_id, is_active=is_active)
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+    return user

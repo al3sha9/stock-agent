@@ -35,8 +35,9 @@ class Settings(BaseSettings):
     API_KEY: Optional[str] = None
     CONTACT_EMAIL: Optional[str] = None
     
-    # LangChain / Google Gemini (for LangGraph)
+    # AI Services
     GOOGLE_API_KEY: Optional[str] = None
+    TAVILY_API_KEY: Optional[str] = None
     
     # Financial Modeling Prep (for SEC data)
     FMP_API_KEY: Optional[str] = None

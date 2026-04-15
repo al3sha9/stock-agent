@@ -4,6 +4,7 @@ import json
 from bs4 import BeautifulSoup
 from loguru import logger
 from typing import Optional, List, Dict
+from cachetools import TTLCache
 from app.core.config import get_settings
 
 settings = get_settings()
@@ -21,6 +22,11 @@ class SECService:
     
     # Required as per SEC fair access policy
     DEFAULT_USER_AGENT = f"StockAgent/1.0 ({settings.CONTACT_EMAIL or 'info@example.com'})"
+
+    # TTL Caches: 24 hours (86400 seconds)
+    # Stores Ticker->URL mapping and URL->HTML Text mapping
+    url_cache = TTLCache(maxsize=500, ttl=86400)
+    text_cache = TTLCache(maxsize=500, ttl=86400)
 
     @classmethod
     async def _get_cik_from_ticker(cls, ticker: str) -> Optional[str]:
@@ -85,12 +91,29 @@ class SECService:
     async def get_sec_filing_manually(cls, ticker: str, filing_type: str = "10-K") -> Optional[str]:
         """
         Fallback logic to retrieve filing link directly from SEC.gov.
+        Includes a 24-hour cache layer to prevent spamming EDGAR.
         """
+        cache_key = f"{ticker}_{filing_type}"
+        try:
+            if cache_key in cls.url_cache:
+                logger.info(f"Cache HIT for {ticker} ({filing_type}) URL.")
+                return cls.url_cache[cache_key]
+        except Exception as e:
+            logger.warning(f"url_cache error: {e}")
+
         logger.info(f"Attempting manual SEC EDGAR lookup for {ticker} ({filing_type})...")
         cik = await cls._get_cik_from_ticker(ticker)
         if not cik:
             return None
-        return await cls._get_filing_url_from_edgar(cik, filing_type)
+            
+        url = await cls._get_filing_url_from_edgar(cik, filing_type)
+        if url:
+            try:
+                cls.url_cache[cache_key] = url
+            except Exception as e:
+                logger.warning(f"url_cache set error: {e}")
+                
+        return url
 
     @classmethod
     async def get_latest_filing_url(cls, ticker: str, filing_type: str = "10-K") -> Optional[str]:
@@ -123,7 +146,15 @@ class SECService:
     async def fetch_filing_text(cls, url: str) -> str:
         """
         Downloads a filing and attempts to extract the MD&A section.
+        Caches the text output for 24 hours.
         """
+        try:
+            if url in cls.text_cache:
+                logger.info("Cache HIT for SEC filing text.")
+                return cls.text_cache[url]
+        except Exception as e:
+            logger.warning(f"text_cache error: {e}")
+
         # Always include User-Agent for SEC.gov domains
         headers = {"User-Agent": cls.DEFAULT_USER_AGENT}
         try:
@@ -173,6 +204,12 @@ class SECService:
             extracted = text[start_idx:end_idx].strip()
             if len(extracted) > 10000:
                 extracted = extracted[:10000] + "... [Truncated]"
+                
+            # Store in cache
+            try:
+                cls.text_cache[url] = extracted
+            except Exception as e:
+                logger.warning(f"text_cache set error: {e}")
                 
             return extracted
 

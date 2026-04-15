@@ -15,6 +15,7 @@ from app.db.session import AsyncSessionLocal
 from app.db import crud
 from app.services.sec_service import sec_service
 from app.services.notifier import notifier
+from app.services.news_service import news_service
 
 settings = get_settings()
 
@@ -28,6 +29,7 @@ class AgentState(TypedDict, total=False):
     telegram_chat_id: str
     financial_data: Dict[str, Any]
     filing_context: str
+    news_context: str
     shares_outstanding: int
     intrinsic_value: float
     rsi: Optional[float]
@@ -93,6 +95,20 @@ async def fetch_financials(state: AgentState) -> Dict[str, Any]:
         "financial_data": financials,
         "filing_context": filing_ctx,
         "shares_outstanding": shares_outstanding
+    }
+
+async def analyze_sentiment(state: AgentState) -> Dict[str, Any]:
+    """
+    Node: Fetches 24-hour real-time market sentiment context using Tavily.
+    Runs in parallel with fetch_financials.
+    """
+    ticker_symbol = state["ticker"]
+    logger.info(f"Agent Node [analyze_sentiment]: Fetching news for {ticker_symbol}")
+    
+    context = await news_service.get_ticker_news(ticker_symbol)
+    
+    return {
+        "news_context": context
     }
 
 async def estimate_growth(state: AgentState) -> Dict[str, Any]:
@@ -223,15 +239,17 @@ async def generate_report(state: AgentState) -> Dict[str, Any]:
     * Intrinsic Value (Per Share): ${state['intrinsic_value']}
     * DCF Assumptions: 5-Year Growth Rate = {growth*100:.1f}%, Discount Rate = {discount*100:.1f}%
     
-    # QUALITATIVE CONTEXT (SEC MD&A)
-    {state.get('filing_context', 'No info')[:8000]}
+    # QUALITATIVE CONTEXT (SEC MD&A & NEWS)
+    SEC Findings: {state.get('filing_context', 'No SEC info')[:4000]}
+    
+    News Headlines (Last 24h): {state.get('news_context', 'No news found')[:4000]}
     
     # INSTRUCTIONS
     1. Compare Price vs. Intrinsic Value. Mention the share count ({share_text}) used in the valuation.
-    2. If technical indicators are provided, mention them to confirm or conflict with the fundamental value (e.g., "The stock is currently oversold with an RSI of {rsi}, confirming a significant short-term dip").
-    3. Incorporate qualitative insights from the SEC context regarding management guidance or risks.
-    4. Provide a clear recommendation (BUY, HOLD, or SELL).
-    5. Strictly limit your response to 4 concise sentences.
+    2. Cross-reference the DCF valuation with the news headlines. If there is a major negative catalyst (e.g., a lawsuit, poor earnings guidance), suggest caution even if the stock mathematically appears "undervalued."
+    3. If technical indicators are provided, mention them to confirm or conflict with the fundamental value.
+    4. Provide a clear, definitive recommendation (BUY, HOLD, or SELL).
+    5. Strictly limit your narrative response to 4 concise sentences.
     6. MANDATORY: The final sentence MUST be exactly: "Projected 5yr Growth: {growth*100:.1f}%, Discount Rate: {discount*100:.1f}%, Shares: {share_text}."
     
     # RECOMMENDATION
@@ -286,6 +304,7 @@ async def notify_user(state: AgentState) -> Dict[str, Any]:
 workflow = StateGraph(AgentState)
 
 workflow.add_node("fetch_financials", fetch_financials)
+workflow.add_node("analyze_sentiment", analyze_sentiment)
 workflow.add_node("estimate_growth", estimate_growth)
 workflow.add_node("calculate_dcf", calculate_dcf)
 workflow.add_node("generate_report", generate_report)
@@ -293,7 +312,9 @@ workflow.add_node("save_results", save_results)
 workflow.add_node("notify_user", notify_user)
 
 workflow.add_edge(START, "fetch_financials")
+workflow.add_edge(START, "analyze_sentiment")
 workflow.add_edge("fetch_financials", "estimate_growth")
+workflow.add_edge("analyze_sentiment", "estimate_growth")
 workflow.add_edge("estimate_growth", "calculate_dcf")
 workflow.add_edge("calculate_dcf", "generate_report")
 workflow.add_edge("generate_report", "save_results")
