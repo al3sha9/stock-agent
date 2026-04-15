@@ -24,6 +24,7 @@ class AgentState(TypedDict):
     ticker: str
     current_price: float
     trigger_event_id: Optional[uuid.UUID]
+    telegram_chat_id: str
     financial_data: Dict[str, Any]
     filing_context: str
     shares_outstanding: int
@@ -192,6 +193,7 @@ async def notify_user(state: AgentState) -> Dict[str, Any]:
     
     try:
         await notifier.send_investment_report(
+            chat_id=state["telegram_chat_id"],
             ticker=state["ticker"],
             report=state["recommendation"],
             intrinsic_value=state["intrinsic_value"],

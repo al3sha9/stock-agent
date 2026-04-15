@@ -15,12 +15,21 @@ async def get_active_watchlist(db: AsyncSession) -> List[Watchlist]:
     )
     return list(result.scalars().all())
 
-async def get_watchlist_item_by_ticker(db: AsyncSession, ticker: str) -> Optional[Watchlist]:
+async def get_user_watchlist(db: AsyncSession, chat_id: str) -> List[Watchlist]:
     """
-    Retrieve a watchlist item by its ticker symbol.
+    Retrieve all watchlist items for a specific user.
     """
     result = await db.execute(
-        select(Watchlist).where(Watchlist.ticker == ticker)
+        select(Watchlist).where(Watchlist.telegram_chat_id == chat_id)
+    )
+    return list(result.scalars().all())
+
+async def get_watchlist_item_by_ticker(db: AsyncSession, ticker: str, chat_id: str) -> Optional[Watchlist]:
+    """
+    Retrieve a watchlist item by its ticker symbol and telegram_chat_id.
+    """
+    result = await db.execute(
+        select(Watchlist).where(Watchlist.ticker == ticker, Watchlist.telegram_chat_id == chat_id)
     )
     return result.scalars().first()
 
@@ -49,24 +58,24 @@ async def update_watchlist_item(
     await db.refresh(db_item)
     return db_item
 
-async def remove_watchlist_item(db: AsyncSession, ticker: str) -> bool:
+async def remove_watchlist_item(db: AsyncSession, ticker: str, chat_id: str) -> bool:
     """
-    Remove a watchlist item by ticker symbol.
+    Remove a watchlist item by ticker symbol for a specific user.
     Returns True if deleted, False otherwise.
     """
     result = await db.execute(
-        delete(Watchlist).where(Watchlist.ticker == ticker)
+        delete(Watchlist).where(Watchlist.ticker == ticker, Watchlist.telegram_chat_id == chat_id)
     )
     await db.commit()
     return result.rowcount > 0
 
-async def deactivate_watchlist_item(db: AsyncSession, ticker: str) -> bool:
+async def deactivate_watchlist_item(db: AsyncSession, ticker: str, chat_id: str) -> bool:
     """
     Deactivate a watchlist item instead of deleting it.
     """
     result = await db.execute(
         update(Watchlist)
-        .where(Watchlist.ticker == ticker)
+        .where(Watchlist.ticker == ticker, Watchlist.telegram_chat_id == chat_id)
         .values(is_active=False)
     )
     await db.commit()
@@ -97,12 +106,15 @@ async def get_last_trigger_event(db: AsyncSession, watchlist_id: uuid.UUID) -> O
     )
     return result.scalars().first()
 
-async def get_trigger_events(db: AsyncSession) -> List[TriggerEvent]:
+async def get_trigger_events(db: AsyncSession, chat_id: str) -> List[TriggerEvent]:
     """
-    Retrieve all trigger events, ordered by timestamp descending.
+    Retrieve all trigger events for a specific user, ordered by timestamp descending.
     """
     result = await db.execute(
-        select(TriggerEvent).order_by(TriggerEvent.timestamp.desc())
+        select(TriggerEvent)
+        .join(Watchlist)
+        .where(Watchlist.telegram_chat_id == chat_id)
+        .order_by(TriggerEvent.timestamp.desc())
     )
     return list(result.scalars().all())
 

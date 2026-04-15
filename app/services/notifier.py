@@ -16,29 +16,14 @@ from app.schemas.stock import WatchlistCreate
 
 settings = get_settings()
 
-
-def restricted(func):
-    """
-    Decorator to restrict bot commands to the authorized TELEGRAM_CHAT_ID.
-    Works correctly on instance methods by explicitly handling 'self'.
-    """
-    @wraps(func)
-    async def wrapper(self, update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
-        user_id = str(update.effective_chat.id)
-        if user_id != settings.TELEGRAM_CHAT_ID:
-            logger.warning(f"Unauthorized access attempt by ID: {user_id}")
-            return
-        return await func(self, update, context, *args, **kwargs)
-    return wrapper
-
 class TelegramNotifier:
     """
     Service for sending investment reports and handling interactive commands.
+    Fully multi-tenant: supports unique watchlists per user chat ID.
     """
 
     def __init__(self):
         self.bot_token = settings.TELEGRAM_BOT_TOKEN
-        self.chat_id = settings.TELEGRAM_CHAT_ID
         self._ptb_app = None
 
     @property
@@ -78,20 +63,19 @@ class TelegramNotifier:
         self._ptb_app.add_handler(CommandHandler("status", self.status_command))
         logger.info("Telegram command handlers registered.")
 
-    @restricted
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handler for /start."""
         welcome_text = (
             "\U0001f680 *Stock Monitor Agent Active*\n\n"
+            "This bot tracks stocks and provides AI analysis.\n"
             "Use the following commands:\n"
             "\u2022 `/add TICKER PRICE` \\- Watch a new stock\n"
             "\u2022 `/remove TICKER` \\- Stop watching a stock\n"
-            "\u2022 `/list` \\- See your watchlist\n"
+            "\u2022 `/list` \\- See your personal watchlist\n"
             "\u2022 `/status TICKER` \\- Immediate AI analysis"
         )
         await update.message.reply_text(welcome_text, parse_mode=ParseMode.MARKDOWN_V2)
 
-    @restricted
     async def add_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handler for /add TICKER PRICE."""
         try:
@@ -111,16 +95,23 @@ class TelegramNotifier:
                 await update.message.reply_text(f"❌ Could not find market price for {ticker_sym}")
                 return
 
+            user_id = str(update.effective_chat.id)
+
             async with AsyncSessionLocal() as db:
-                # Check if already exists
-                existing = await crud.get_watchlist_item_by_ticker(db, ticker_sym)
+                # Check if already exists for this user
+                existing = await crud.get_watchlist_item_by_ticker(db, ticker_sym, user_id)
                 if existing:
                     await update.message.reply_text(f"\u2139\ufe0f {ticker_sym} is already on your watchlist\\.")  
                     return
 
                 await crud.create_watchlist_item(
                     db, 
-                    WatchlistCreate(ticker=ticker_sym, target_price=target_price, drop_trigger=10.0)
+                    WatchlistCreate(
+                        ticker=ticker_sym, 
+                        target_price=target_price, 
+                        drop_trigger=10.0,
+                        telegram_chat_id=user_id
+                    )
                 )
 
             await update.message.reply_text(
@@ -133,7 +124,6 @@ class TelegramNotifier:
             logger.error(f"Error in /add: {e}")
             await update.message.reply_text(f"❌ Error adding stock: {str(e)}")
 
-    @restricted
     async def remove_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handler for /remove TICKER."""
         try:
@@ -142,8 +132,10 @@ class TelegramNotifier:
                 return
 
             ticker_sym = context.args[0].upper()
+            user_id = str(update.effective_chat.id)
+
             async with AsyncSessionLocal() as db:
-                success = await crud.remove_watchlist_item(db, ticker_sym)
+                success = await crud.remove_watchlist_item(db, ticker_sym, user_id)
 
             if success:
                 await update.message.reply_text(f"\U0001f5d1 Removed *{ticker_sym}* from watchlist\\.", parse_mode=ParseMode.MARKDOWN_V2)
@@ -153,12 +145,12 @@ class TelegramNotifier:
             logger.error(f"Error in /remove: {e}")
             await update.message.reply_text(f"❌ Error removing stock: {str(e)}")
 
-    @restricted
     async def list_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handler for /list."""
         try:
+            user_id = str(update.effective_chat.id)
             async with AsyncSessionLocal() as db:
-                watchlist = await crud.get_active_watchlist(db)
+                watchlist = await crud.get_user_watchlist(db, user_id)
 
             if not watchlist:
                 await update.message.reply_text("Your watchlist is currently empty\\.")  
@@ -174,7 +166,6 @@ class TelegramNotifier:
             logger.error(f"Error in /list: {e}")
             await update.message.reply_text("\u274c Error listing watchlist\\.")  
 
-    @restricted
     async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handler for /status TICKER."""
         try:
@@ -196,10 +187,13 @@ class TelegramNotifier:
             info = await asyncio.to_thread(lambda: ticker.info)
             current_price = info.get("currentPrice") or info.get("regularMarketPrice", 0)
 
+            user_id = str(update.effective_chat.id)
+
             initial_state = {
                 "ticker": ticker_sym,
                 "current_price": current_price,
                 "trigger_event_id": None,
+                "telegram_chat_id": user_id,
                 "messages": []
             }
 
@@ -212,6 +206,7 @@ class TelegramNotifier:
 
     async def send_investment_report(
         self, 
+        chat_id: str,
         ticker: str, 
         report: str, 
         intrinsic_value: float, 
@@ -220,8 +215,8 @@ class TelegramNotifier:
         """
         Sends a formatted investment report to the configured Telegram chat.
         """
-        if not self.ptb_app or not self.chat_id:
-            logger.warning("Telegram Bot Token or Chat ID not configured. Notification skipped.")
+        if not self.ptb_app or not chat_id:
+            logger.warning("Telegram Bot Token or Chat ID empty. Notification skipped.")
             return
 
         # Simple Status-based rec
@@ -259,7 +254,7 @@ class TelegramNotifier:
         try:
             # We use the internal bot instance from ptb_app
             await self.ptb_app.bot.send_message(
-                chat_id=self.chat_id,
+                chat_id=chat_id,
                 text=message,
                 parse_mode=ParseMode.MARKDOWN_V2
             )

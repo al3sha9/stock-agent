@@ -20,7 +20,7 @@ class SECService:
     SEC_ARCHIVES_URL = "https://www.sec.gov/Archives/edgar/data/{cik}/{acc_no_no_dashes}/{primary_doc}"
     
     # Required as per SEC fair access policy
-    DEFAULT_USER_AGENT = "StockAgent/1.0 (info@example.com)"
+    DEFAULT_USER_AGENT = f"StockAgent/1.0 ({settings.CONTACT_EMAIL or 'info@example.com'})"
 
     @classmethod
     async def _get_cik_from_ticker(cls, ticker: str) -> Optional[str]:

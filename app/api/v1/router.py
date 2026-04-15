@@ -1,8 +1,9 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from app.api.v1.endpoints import stocks, logs
+from app.api.deps import get_api_key
 
-api_router = APIRouter()
+api_router = APIRouter(dependencies=[Depends(get_api_key)])
 
 api_router.include_router(stocks.router, prefix="/watchlist", tags=["watchlist"])
 api_router.include_router(logs.router, prefix="/logs", tags=["logs"])

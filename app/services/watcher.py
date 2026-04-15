@@ -10,6 +10,19 @@ from app.db.session import AsyncSessionLocal
 from app.db.crud import get_active_watchlist, get_last_trigger_event, log_trigger_event
 from app.services.analyst_agent import analyst_graph
 
+background_tasks = set()
+
+def handle_task_result(task: asyncio.Task):
+    """Callback to handle cleanup and unhandled errors in background tasks."""
+    background_tasks.discard(task)
+    if not task.cancelled():
+        exc = task.exception()
+        if exc:
+            try:
+                raise exc
+            except Exception:
+                logger.exception("Unhandled exception in background agent task")
+
 class WatcherEngine:
     """
     Engine for monitoring stock prices and triggering alerts.
@@ -83,6 +96,7 @@ class WatcherEngine:
         Runs a single cycle of the watcher engine with technical analysis triggers.
         """
         logger.info("Watcher cycle started.")
+        tasks_to_trigger = []
         
         async with AsyncSessionLocal() as db:
             try:
@@ -106,8 +120,6 @@ class WatcherEngine:
                     prev_close = data["previous_close"]
                     rsi = data["rsi"]
                     sma20 = data["sma20"]
-                    
-                    drop_from_close = prev_close - current_price
 
                     # 2. Check Triggers
                     # A) Target Price Hit
@@ -136,20 +148,27 @@ class WatcherEngine:
                         event = await log_trigger_event(db, item.id, current_price)
                         logger.success(f"Log recorded for {item.ticker}")
 
-                        # 5. Trigger Analyst Agent (LangGraph) with Technical context
-                        asyncio.create_task(analyst_graph.ainvoke({
+                        # 5. Collect payload to trigger Analyst Agent outside DB session
+                        tasks_to_trigger.append({
                             "ticker": item.ticker,
                             "current_price": current_price,
                             "trigger_event_id": event.id,
+                            "telegram_chat_id": item.telegram_chat_id,
                             "rsi": rsi,
                             "sma20": sma20,
                             "messages": []
-                        }))
-                        logger.info(f"Analyst Agent triggered for {item.ticker} with TA context.")
+                        })
 
                 except Exception as e:
                     logger.error(f"Unexpected error processing {item.ticker}: {e}")
                     continue
+
+        # 6. Trigger Agent tasks outside DB session
+        for state_payload in tasks_to_trigger:
+            task = asyncio.create_task(analyst_graph.ainvoke(state_payload))
+            background_tasks.add(task)
+            task.add_done_callback(handle_task_result)
+            logger.info(f"Analyst Agent triggered for {state_payload['ticker']} with TA context.")
 
         logger.info("Watcher cycle completed.")
 

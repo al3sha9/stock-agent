@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import String, Float, Boolean, ForeignKey, DateTime
+from sqlalchemy import String, Float, Boolean, ForeignKey, DateTime, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import UUID
 
@@ -13,10 +13,15 @@ class Watchlist(Base):
     __tablename__ = "watchlist"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    ticker: Mapped[str] = mapped_column(String, unique=True, index=True, nullable=False)
+    ticker: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    telegram_chat_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
     target_price: Mapped[float] = mapped_column(Float, nullable=False)
     drop_trigger: Mapped[float] = mapped_column(Float, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("ticker", "telegram_chat_id", name="uix_ticker_user_chat_id"),
+    )
 
     # Relationships
     trigger_events: Mapped[list["TriggerEvent"]] = relationship(

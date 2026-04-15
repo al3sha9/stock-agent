@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Header
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List
 
@@ -9,8 +9,8 @@ from app.schemas.stock import TriggerEventRead
 router = APIRouter()
 
 @router.get("/triggers", response_model=List[TriggerEventRead])
-async def read_trigger_events(db: AsyncSession = Depends(get_db)):
+async def read_trigger_events(db: AsyncSession = Depends(get_db), x_telegram_chat_id: str = Header(...)):
     """
-    Retrieve the history of all triggered events, ordered by newest first.
+    Retrieve the history of all triggered events for the user, ordered by newest first.
     """
-    return await crud.get_trigger_events(db)
+    return await crud.get_trigger_events(db, x_telegram_chat_id)

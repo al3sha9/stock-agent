@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     API_V1_STR: str = "/api/v1"
     PROJECT_NAME: str = "Stock Monitoring Agent"
     
+    # Security & Identity
+    API_KEY: Optional[str] = None
+    CONTACT_EMAIL: Optional[str] = None
+    
     # LangChain / Google Gemini (for LangGraph)
     GOOGLE_API_KEY: Optional[str] = None
     
