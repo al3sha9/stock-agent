@@ -3,7 +3,7 @@ import yfinance as yf
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from telegram.constants import ParseMode
-from telegram.helpers import escape_markdown
+import re
 from loguru import logger
 from typing import Optional
 
@@ -12,6 +12,23 @@ from app.core.config import get_settings
 from app.db.session import AsyncSessionLocal
 from app.db import crud
 from app.schemas.stock import WatchlistCreate
+
+def custom_escape_markdown(text: str) -> str:
+    """
+    Escapes Telegram MarkdownV2 reserved characters while PRESERVING 
+    intentional formatting markers (*, _, ~, `).
+    Also converts standard Markdown ** to Telegram's *.
+    """
+    if not text:
+        return ""
+        
+    # Convert standard Markdown **bold** to Telegram *bold*
+    text = text.replace("**", "*")
+    
+    # Characters strictly reserved by Telegram V2 that we MUST escape 
+    # (Excluding *, _, ~, ` which are used for intentional styling)
+    safe_to_escape = r'([\[\]\(\)\>\#\+\-\=\|\{\}\.\!])'
+    return re.sub(safe_to_escape, r'\\\1', text)
 
 def verify_user(func):
     """
@@ -85,11 +102,13 @@ class TelegramNotifier:
             "\U0001f680 *Stock Monitor Agent Active*\n\n"
             "This bot tracks stocks and provides AI analysis.\n"
             "Use the following commands:\n"
-            "\u2022 `/add TICKER PRICE` \\- Watch a new stock\n"
-            "\u2022 `/remove TICKER` \\- Stop watching a stock\n"
-            "\u2022 `/list` \\- See your personal watchlist\n"
-            "\u2022 `/status TICKER` \\- Immediate AI analysis"
+            "\u2022 `/add TICKER PRICE` - Watch a new stock\n"
+            "\u2022 `/remove TICKER` - Stop watching a stock\n"
+            "\u2022 `/list` - See your personal watchlist\n"
+            "\u2022 `/status TICKER` - Immediate AI analysis"
         )
+        
+        safe_welcome = custom_escape_markdown(welcome_text)
         
         user_id = str(update.effective_chat.id)
         async with AsyncSessionLocal() as db:
@@ -104,7 +123,7 @@ class TelegramNotifier:
                 await update.message.reply_text("Welcome back. Your account is still pending activation.")
                 return
                 
-        await update.message.reply_text(welcome_text, parse_mode=ParseMode.MARKDOWN_V2)
+        await update.message.reply_text(safe_welcome, parse_mode=ParseMode.MARKDOWN_V2)
 
     @verify_user
     async def add_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -115,7 +134,11 @@ class TelegramNotifier:
                 return
 
             ticker_sym = context.args[0].upper()
-            target_price = float(context.args[1])
+            try:
+                target_price = float(context.args[1])
+            except ValueError:
+                await update.message.reply_text("❌ Error: PRICE must be a valid number (e.g. 150 or 150.50).", parse_mode=ParseMode.MARKDOWN_V2)
+                return
 
             # Get current price for confirmation
             ticker = yf.Ticker(ticker_sym)
@@ -123,7 +146,7 @@ class TelegramNotifier:
             current_price = info.get("currentPrice") or info.get("regularMarketPrice")
 
             if not current_price:
-                await update.message.reply_text(f"❌ Could not find market price for {ticker_sym}")
+                await update.message.reply_text(f"❌ Could not find market price for {custom_escape_markdown(ticker_sym)}")
                 return
 
             user_id = str(update.effective_chat.id)
@@ -132,7 +155,8 @@ class TelegramNotifier:
                 # Check if already exists for this user
                 existing = await crud.get_watchlist_item_by_ticker(db, ticker_sym, user_id)
                 if existing:
-                    await update.message.reply_text(f"\u2139\ufe0f {ticker_sym} is already on your watchlist\\.")  
+                    msg = f"\u2139\ufe0f {ticker_sym} is already on your watchlist."
+                    await update.message.reply_text(custom_escape_markdown(msg), parse_mode=ParseMode.MARKDOWN_V2)
                     return
 
                 await crud.create_watchlist_item(
@@ -145,15 +169,16 @@ class TelegramNotifier:
                     )
                 )
 
-            await update.message.reply_text(
-                f"\u2705 Added *{ticker_sym}* to watchlist\\.\n"
+            success_str = custom_escape_markdown(
+                f"\u2705 Added *{ticker_sym}* to watchlist.\n"
                 f"\U0001f4b0 Current Price: ${current_price:.2f}\n"
-                f"\U0001f3af Target Price: ${target_price:.2f}",
-                parse_mode=ParseMode.MARKDOWN_V2
+                f"\U0001f3af Target Price: ${target_price:.2f}"
             )
+            await update.message.reply_text(success_str, parse_mode=ParseMode.MARKDOWN_V2)
+            
         except Exception as e:
             logger.error(f"Error in /add: {e}")
-            await update.message.reply_text(f"❌ Error adding stock: {str(e)}")
+            await update.message.reply_text(custom_escape_markdown(f"❌ Error adding stock: {str(e)}"))
 
     @verify_user
     async def remove_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -191,10 +216,19 @@ class TelegramNotifier:
 
             lines = ["\U0001f4cb *Current Watchlist:*\n"]
             for item in watchlist:
-                price_str = escape_markdown(f"{item.target_price:.2f}", version=2)
+                price_str = custom_escape_markdown(f"{item.target_price:.2f}")
                 lines.append(f"\u2022 *{item.ticker}* \\- Target: ${price_str}")
             
-            await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN_V2)
+            safe_text = custom_escape_markdown("\n".join(lines))
+            # Restore the bolding that the manual join was trying to do, or just send it escaped
+            # Actually, because custom_escape_markdown preserves *, we can just escape the whole joined string!
+            
+            lines_raw = ["\U0001f4cb *Current Watchlist:*\n"]
+            for item in watchlist:
+                lines_raw.append(f"\u2022 *{item.ticker}* - Target: ${item.target_price:.2f}")
+                
+            safe_text = custom_escape_markdown("\n".join(lines_raw))
+            await update.message.reply_text(safe_text, parse_mode=ParseMode.MARKDOWN_V2)
         except Exception as e:
             logger.error(f"Error in /list: {e}")
             await update.message.reply_text("\u274c Error listing watchlist\\.")  
@@ -260,11 +294,11 @@ class TelegramNotifier:
         elif current_price >= intrinsic_value * 1.1:
             recommendation = "SELL (Overvalued)"
 
-        safe_ticker = escape_markdown(ticker, version=2)
-        safe_rec = escape_markdown(recommendation, version=2)
-        safe_report = escape_markdown(report, version=2)
-        iv_str = escape_markdown(f"{intrinsic_value:.2f}", version=2)
-        cp_str = escape_markdown(f"{current_price:.2f}", version=2)
+        safe_ticker = custom_escape_markdown(ticker)
+        safe_rec = custom_escape_markdown(recommendation)
+        safe_report = custom_escape_markdown(report)
+        iv_str = custom_escape_markdown(f"{intrinsic_value:.2f}")
+        cp_str = custom_escape_markdown(f"{current_price:.2f}")
 
         message = (
             f"🎯 *Ticker:* ${safe_ticker}\n\n"
