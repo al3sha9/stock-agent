@@ -6,9 +6,9 @@
 
 ## 🧠 What Is This?
 
-The **Stock Monitoring Agent** is a self-contained backend service that acts as your personal, always-on equity analyst. You configure a stock watchlist, set your target prices, and the system handles everything else — from real-time price monitoring to generating AI-powered investment reports and delivering them directly to your phone.
+The **Stock Monitoring Agent** is a multi-tenant, production-ready backend framework acting as your personal, always-on equity analyst. You configure a stock watchlist, set your target prices, and the system handles everything else — from real-time price monitoring to generating AI-powered investment reports and delivering them directly to your phone.
 
-It is **not a trading bot** — it does not execute trades. Instead, it is a **research and alerting system** that combines quantitative financial data, technical analysis, and qualitative SEC filing context to provide structured investment recommendations.
+It is **not a trading bot** — it does not execute trades. Instead, it is a **secure research and alerting tool** combining advanced quantitative DCF modeling, technical momentum signals, and qualitative SEC/News sentiment analysis to yield elite actionable insights.
 
 ---
 
@@ -17,7 +17,7 @@ It is **not a trading bot** — it does not execute trades. Instead, it is a **r
 The system operates as a continuous loop with five distinct phases:
 
 ```
-Price Monitoring → Trigger Detection → AI Research Agent → Valuation → Report & Notify
+Price Monitoring → Trigger Detection → AI Research Agent (Fan-Out/Fan-In) → 5Y DCF Valuation → Report & Notify
 ```
 
 ### Phase 1: Price Monitoring (WatcherEngine)
@@ -39,33 +39,27 @@ A trigger fires under **two conditions**:
 
 A **60-minute cooldown** prevents duplicate alerts for the same ticker.
 
-### Phase 3: AI Research (LangGraph Analyst Agent)
-When a trigger fires, a stateful **LangGraph** pipeline is launched asynchronously. It runs through five nodes in sequence:
+### Phase 3: AI Research (LangGraph Pipeline)
+When a trigger fires, a stateful **LangGraph** asynchronous state machine is launched. It features Fan-Out execution to pull parallel context:
 
 ```
-fetch_financials → calculate_dcf → generate_report → save_results → notify_user
+[START]
+   ↘→ fetch_financials (SEC EDGAR) ━━↘
+   ↘→ analyze_sentiment (Tavily) ━━━━↘ [WAIT] → estimate_growth → calculate_dcf → generate_report → save_results → notify_user
 ```
 
-#### `fetch_financials`
-- Pulls Income Statement, Cash Flow, and Shares Outstanding from `yfinance`
-- Fetches the most recent **10-K or 10-Q SEC filing** to extract the *Management's Discussion and Analysis (MD&A)* section
-- SEC data uses **Financial Modeling Prep (FMP)** as the primary source, with an automatic fallback to the official **SEC EDGAR API** if FMP returns a 403 error
-- All SEC.gov requests include a mandatory `User-Agent` header per SEC fair access policy
+#### `fetch_financials` & `analyze_sentiment` (Parallel Execution)
+- **Financial Fetcher**: Pulls Income Statements and cached SEC EDGAR filings (MD&A sections) to ground the AI in raw quantitative figures and corporate strategy.
+- **Sentiment Analyzer**: Queries the **Tavily API** natively filtering the last 24-hours for *"why is [TICKER] stock price moving today?"* to grab live headlines protecting against value traps (e.g., lawsuits, earnings downgrades).
+- Both requests deduplicate and execute asynchronously.
 
-#### `calculate_dcf`
-- Calculates the **per-share intrinsic value** using a simplified DCF:
-  ```
-  Intrinsic Value = (Free Cash Flow × 15) / Shares Outstanding
-  ```
-- Aborts with `DATA_INCOMPLETE` if shares outstanding or FCF is zero/missing
+#### `estimate_growth` & `calculate_dcf`
+- Identifies FCF metrics and utilizes **Gemini 2.5 Flash** (via Pydantic `.with_structured_output`) to accurately infer a conservative 5-Year growth horizon based on SEC language constraints (-20% to +50% bounded).
+- Calculates the true **Present Value** by discounting a robust 5-year compounding FCF logic base and generating a terminal value through the **Gordon Growth Method** (2% perpetual market cap).
 
 #### `generate_report`
-- Invokes **Google Gemini 2.5 Flash** with a structured prompt containing:
-  - Current price vs. intrinsic value
-  - Shares outstanding (shown as `14.68B`, `250M`, etc.)
-  - Technical indicators (RSI, SMA20) for momentum context
-  - Up to 8,000 characters of SEC MD&A text for qualitative context
-- Gemini is instructed to produce a 4-sentence recommendation (BUY / HOLD / SELL)
+- Fuses all context variables together inside Gemini. It weighs the hard DCF numbers vs short-term Technicals (RSI) vs active market sentiment headlines.
+- Gemini is rigidly enforced to "Show Its Work", mandated to append an auditing sentence string validating its FCF/Discount rate choices against the share outstanding parameters.
 
 #### `save_results`
 - Persists the `intrinsic_value` and `recommendation` to the Supabase database against the trigger event record
@@ -104,7 +98,7 @@ The Telegram bot isn't just for receiving reports — it's a full control interf
 | `/list` | Show all watched stocks and their targets |
 | `/status AAPL` | Trigger an immediate AI analysis for AAPL right now |
 
-> **Security**: All commands are restricted to your configured `TELEGRAM_CHAT_ID`. Any other user who messages the bot will be silently ignored.
+> **Security (RBAC)**: All commands execute through an isolated `@verify_user` decorator. Untrusted users who ping the bot will trigger an auto-register protocol adding their Telegram ID to your database waitlist as `is_active=False` and immediately terminating their connections.
 
 The bot uses **polling mode**, running inside the FastAPI application's async event loop alongside the price watcher and REST API — no separate process needed.
 
@@ -114,30 +108,32 @@ The bot uses **polling mode**, running inside the FastAPI application's async ev
 
 | Layer | Technology | Purpose |
 |---|---|---|
-| **Web Framework** | FastAPI | REST API + async lifecycle management |
-| **AI Agent** | LangGraph | Stateful multi-step research pipeline |
-| **LLM** | Google Gemini 2.5 Flash | Report generation & analysis |
-| **Database** | Supabase (PostgreSQL) | Persistent watchlist & event storage |
-| **ORM** | SQLAlchemy 2.0 (Async) | Async database access |
-| **DB Driver** | asyncpg | High-performance async PostgreSQL driver |
-| **Scheduler** | APScheduler | Background 5-minute price monitoring loop |
+| **API Boundary** | FastAPI | REST API + async lifecycle management, secured by headers. |
+| **Orchestrator** | LangGraph | Stateful multi-step research pipeline mapping fan-in/fan-out graph state structures. |
+| **Database** | Supabase (PostgreSQL) | Persistent multi-tenant watchlist, RBAC user state, & event storage |
 | **Market Data** | yfinance | Real-time prices, financials, share data |
-| **SEC Data** | FMP API + SEC EDGAR | 10-K/10-Q filing retrieval |
-| **Telegram** | python-telegram-bot | Interactive bot + investment reports |
-| **Proxy** | Cloudflare Workers (optional) | Route Telegram API through reverse proxy |
-| **Logging** | Loguru | Structured, colored log output |
+| **Sentiment Context** | Tavily Search SDK | Real-Time Live web probing identifying catalysts |
+| **Deployment** | Docker | Production container image powered by `python:3.12-slim` |
+| **Logging** | Loguru | Serialize=True mapped output streaming directly to standard cloud JSON outputs. |
 
 ---
 
 ## 🗄️ Data Models
 
+### `User` (RBAC Control)
+| Field | Type | Description |
+|---|---|---|
+| `id` | UUID | Primary key |
+| `telegram_chat_id` | String | Unique endpoint location identifier for Telegram connections |
+| `is_active` | Boolean | Gating boolean required to utilize system commands |
+
 ### `Watchlist`
 | Field | Type | Description |
 |---|---|---|
 | `id` | UUID | Primary key |
+| `telegram_chat_id` | String | Foreign-key scoping allowing dynamic isolated tracking |
 | `ticker` | String | Stock symbol (e.g., `AAPL`) |
 | `target_price` | Float | Price level that triggers analysis |
-| `drop_trigger` | Float | Drop-from-close threshold |
 | `is_active` | Boolean | Whether monitoring is active |
 
 ### `TriggerEvent`
@@ -168,13 +164,16 @@ API_V1_STR="/api/v1"
 
 # AI
 GOOGLE_API_KEY=your-google-ai-studio-key
+TAVILY_API_KEY=your-tavily-api-search-key
 
 # SEC Data
 FMP_API_KEY=your-fmp-api-key
 
+# API Security
+API_KEY=your-super-secret-rest-header-wrapper
+
 # Telegram
 TELEGRAM_BOT_TOKEN=your-bot-token-from-botfather
-TELEGRAM_CHAT_ID=your-numeric-telegram-id
 
 # Optional: Cloudflare reverse proxy (leave empty to use default Telegram API)
 TELEGRAM_BASE_URL=https://your-worker.workers.dev/bot
@@ -184,48 +183,42 @@ TELEGRAM_BASE_URL=https://your-worker.workers.dev/bot
 > Use the **Supavisor Transaction Mode** connection string (port `6543`), not the direct connection. The app disables prepared statement caching for full compatibility with Supabase's connection pooler.
 
 > [!TIP]
-> To get your `TELEGRAM_CHAT_ID`, message [@userinfobot](https://t.me/userinfobot) on Telegram.
+> To get your API Access Chat ID, message [@userinfobot](https://t.me/userinfobot) on Telegram.
 
 ---
 
 ## 🚀 Setup & Running
 
 ### Prerequisites
-- Python 3.12+
+- Python 3.12+ (or Docker desktop)
 - A [Supabase](https://supabase.com) project
 - A [Google AI Studio](https://aistudio.google.com) API key
-- A Telegram bot token from [@BotFather](https://t.me/BotFather)
-- (Optional) An [FMP](https://financialmodelingprep.com/) API key for SEC filing data
+- A [Tavily](https://tavily.com/) Search API key
+- A Telegram bot token from [@BotFather](https://tme/BotFather)
 
-### 1. Clone & Install
+### 1. Clone & Configure
 ```bash
 git clone https://github.com/al3sha9/stock-agent.git
 cd stock-agent
-python3.12 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
-
-### 2. Configure Environment
-```bash
 cp .env.example .env
-# Edit .env with your credentials
+# Input your keys into the .env file!
 ```
 
-### 3. Initialize Database
-Run the table creation SQL in your Supabase SQL Editor. The schema is defined in `app/db/models.py`.
-
-### 4. Run the App
+### 2. Run the App (Docker Native Deployment)
+The fastest way to deploy the system safely isolating all processes:
 ```bash
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+docker build -t stock-agent-app .
+docker run --env-file .env -p 8000:8000 -it stock-agent-app
 ```
+*Your application is now natively health-checked and load balancer ready on `localhost:8000/health`*
 
-You should see:
-```
-INFO | Telegram interactive bot polling started.
-INFO | Background scheduler started.
-INFO | Watcher job scheduled (every 5 minutes).
-INFO | Application startup complete.
+### 3. Initialize Admin Access / Telemetry
+The bot boots utilizing zero-trust database protections. Once the server is running, execute the bootstrapping script natively to seed your personal chat parameters straight into the mapped active Supabase schemas:
+
+```bash
+# If developing locally (bypassing docker):
+python scripts/seed_admin.py 
+# Then follow the CLI prompts to input your active Chat ID!
 ```
 
 ### 5. Verify the Pipeline
