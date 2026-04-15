@@ -60,7 +60,6 @@ async def get_watchlist_status(db: AsyncSession = Depends(get_db), x_telegram_ch
         results.append({
             "ticker": item.ticker,
             "target_price": item.target_price,
-            "drop_trigger": item.drop_trigger,
             "current_price": data.get("last_price") if data["success"] else None,
             "previous_close": data.get("previous_close") if data["success"] else None,
             "status": "online" if data["success"] else "error"

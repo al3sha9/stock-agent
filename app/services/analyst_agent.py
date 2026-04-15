@@ -8,6 +8,7 @@ from loguru import logger
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
 from langgraph.graph import StateGraph, START, END
+from pydantic import BaseModel, Field
 
 from app.core.config import get_settings
 from app.db.session import AsyncSessionLocal
@@ -17,7 +18,7 @@ from app.services.notifier import notifier
 
 settings = get_settings()
 
-class AgentState(TypedDict):
+class AgentState(TypedDict, total=False):
     """
     State shared between nodes in the Analyst Agent graph.
     """
@@ -31,8 +32,15 @@ class AgentState(TypedDict):
     intrinsic_value: float
     rsi: Optional[float]
     sma20: Optional[float]
+    growth_rate: float
+    discount_rate: float
     recommendation: str
     messages: Annotated[List[Any], operator.add]
+
+# --- Schemas ---
+
+class GrowthEstimate(BaseModel):
+    growth_rate: float = Field(description="Estimated 5-year Free Cash Flow growth rate as a decimal (e.g., 0.12 for 12%)")
 
 # --- Nodes ---
 
@@ -87,21 +95,85 @@ async def fetch_financials(state: AgentState) -> Dict[str, Any]:
         "shares_outstanding": shares_outstanding
     }
 
+async def estimate_growth(state: AgentState) -> Dict[str, Any]:
+    """
+    Node: Analyzes SEC filings using Gemini to estimate a realistic 5-year FCF growth rate.
+    """
+    default_growth = 0.10
+    
+    if not settings.GOOGLE_API_KEY:
+        logger.warning("No Google API Key, defaulting growth rate to 10%")
+        return {"growth_rate": default_growth}
+
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-2.5-flash", 
+        google_api_key=settings.GOOGLE_API_KEY,
+        temperature=0.0,
+        max_retries=3
+    )
+    
+    structured_llm = llm.with_structured_output(GrowthEstimate)
+    
+    prompt = f"""
+    You are a conservative financial analyst. 
+    Analyze the following SEC MD&A text for {state['ticker']} and estimate a realistic, conservative 5-year Free Cash Flow growth rate.
+    Output the rate as a decimal (e.g., 0.10 for 10%). If the text doesn't provide enough info, default to 0.10.
+    
+    SEC Text: {state.get('filing_context', 'No text available')[:10000]}
+    """
+    
+    try:
+        logger.info(f"Agent Node [estimate_growth]: Estimating growth rate for {state['ticker']} from SEC context.")
+        response = await structured_llm.ainvoke([HumanMessage(content=prompt)])
+        rate = response.growth_rate
+        # Cap unreasonable bounds (-20% to +50%)
+        rate = max(-0.20, min(0.50, rate)) 
+        return {"growth_rate": round(rate, 3)}
+    except Exception as e:
+        logger.error(f"Failed to estimate growth rate via LLM: {e}")
+        return {"growth_rate": default_growth}
+
 async def calculate_dcf(state: AgentState) -> Dict[str, Any]:
     """
     Node: Logic node for valuation. Calculates per-share intrinsic value.
-    Formula: (FCF * 15) / Shares Outstanding
+    Formula: 5-Year DCF with Gordon Growth Terminal Value.
     """
     fcf = state["financial_data"].get("free_cash_flow", 0)
     shares = state.get("shares_outstanding", 0)
     
-    if fcf <= 0 or shares <= 0:
-        logger.warning(f"Incomplete data for DCF: FCF={fcf}, Shares={shares}")
-        return {"intrinsic_value": 0.0}
+    growth_rate = state.get("growth_rate", 0.10)
+    discount_rate = state.get("discount_rate", 0.10)
+    terminal_growth_rate = 0.02
     
-    intrinsic_val = (fcf * 15) / shares
+    if fcf <= 0 or shares <= 0:
+        logger.warning(f"Incomplete/Negative data for DCF: FCF={fcf}, Shares={shares}")
+        return {"intrinsic_value": 0.0, "discount_rate": discount_rate}
+    
+    # 1. Project 5 years of FCF
+    cash_flows = []
+    current_fcf = fcf
+    for _ in range(5):
+        current_fcf *= (1 + growth_rate)
+        cash_flows.append(current_fcf)
         
-    return {"intrinsic_value": round(intrinsic_val, 2)}
+    # 2. Discount the 5 projected years to Present Value
+    pv_cash_flows = sum(cf / ((1 + discount_rate) ** i) for i, cf in enumerate(cash_flows, 1))
+    
+    # 3. Terminal Value: Gordon Growth Method on Year 5 cash flow
+    if discount_rate <= terminal_growth_rate:
+        terminal_value = 0
+    else:
+        terminal_value = (cash_flows[-1] * (1 + terminal_growth_rate)) / (discount_rate - terminal_growth_rate)
+    
+    pv_terminal_value = terminal_value / ((1 + discount_rate) ** 5)
+    
+    total_enterprise_value = pv_cash_flows + pv_terminal_value
+    intrinsic_val = total_enterprise_value / shares
+        
+    return {
+        "intrinsic_value": round(intrinsic_val, 2),
+        "discount_rate": discount_rate
+    }
 
 async def generate_report(state: AgentState) -> Dict[str, Any]:
     """
@@ -136,6 +208,9 @@ async def generate_report(state: AgentState) -> Dict[str, Any]:
     if rsi is not None and sma20 is not None:
         tech_context = f"\n* Technical Indicators: RSI(14)={rsi}, 20-day SMA=${sma20}"
 
+    growth = state.get("growth_rate", 0.10)
+    discount = state.get("discount_rate", 0.10)
+
     prompt = f"""
     # ROLE
     You are a Senior Equity Analyst. 
@@ -146,9 +221,10 @@ async def generate_report(state: AgentState) -> Dict[str, Any]:
     * Shares Outstanding: {share_text}
     * Financials: {state['financial_data']}{tech_context}
     * Intrinsic Value (Per Share): ${state['intrinsic_value']}
+    * DCF Assumptions: 5-Year Growth Rate = {growth*100:.1f}%, Discount Rate = {discount*100:.1f}%
     
     # QUALITATIVE CONTEXT (SEC MD&A)
-    {state['filing_context'][:8000]}
+    {state.get('filing_context', 'No info')[:8000]}
     
     # INSTRUCTIONS
     1. Compare Price vs. Intrinsic Value. Mention the share count ({share_text}) used in the valuation.
@@ -156,6 +232,7 @@ async def generate_report(state: AgentState) -> Dict[str, Any]:
     3. Incorporate qualitative insights from the SEC context regarding management guidance or risks.
     4. Provide a clear recommendation (BUY, HOLD, or SELL).
     5. Strictly limit your response to 4 concise sentences.
+    6. MANDATORY: The final sentence MUST be exactly: "Projected 5yr Growth: {growth*100:.1f}%, Discount Rate: {discount*100:.1f}%, Shares: {share_text}."
     
     # RECOMMENDATION
     """
@@ -209,13 +286,15 @@ async def notify_user(state: AgentState) -> Dict[str, Any]:
 workflow = StateGraph(AgentState)
 
 workflow.add_node("fetch_financials", fetch_financials)
+workflow.add_node("estimate_growth", estimate_growth)
 workflow.add_node("calculate_dcf", calculate_dcf)
 workflow.add_node("generate_report", generate_report)
 workflow.add_node("save_results", save_results)
 workflow.add_node("notify_user", notify_user)
 
 workflow.add_edge(START, "fetch_financials")
-workflow.add_edge("fetch_financials", "calculate_dcf")
+workflow.add_edge("fetch_financials", "estimate_growth")
+workflow.add_edge("estimate_growth", "calculate_dcf")
 workflow.add_edge("calculate_dcf", "generate_report")
 workflow.add_edge("generate_report", "save_results")
 workflow.add_edge("save_results", "notify_user")

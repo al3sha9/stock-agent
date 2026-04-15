@@ -3,7 +3,6 @@ import yfinance as yf
 import pandas as pd
 from datetime import datetime, timezone, timedelta
 from loguru import logger
-from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Dict, Any, List, Optional
 
 from app.db.session import AsyncSessionLocal

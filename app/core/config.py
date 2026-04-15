@@ -43,7 +43,6 @@ class Settings(BaseSettings):
 
     # Telegram Bot
     TELEGRAM_BOT_TOKEN: Optional[str] = None
-    TELEGRAM_CHAT_ID: Optional[str] = None
     # Optional Cloudflare reverse proxy for Telegram API
     TELEGRAM_BASE_URL: Optional[str] = None
     

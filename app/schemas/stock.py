@@ -11,7 +11,7 @@ class WatchlistBase(BaseModel):
     target_price: float = Field(..., gt=0)
     drop_trigger: float = Field(..., gt=0)
     is_active: bool = True
-    telegram_chat_id: Optional[str] = None
+    telegram_chat_id: str
 
     @field_validator("ticker")
     @classmethod

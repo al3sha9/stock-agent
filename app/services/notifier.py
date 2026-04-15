@@ -1,4 +1,3 @@
-import telegram
 import asyncio
 import yfinance as yf
 from telegram import Update
@@ -6,8 +5,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from telegram.constants import ParseMode
 from telegram.helpers import escape_markdown
 from loguru import logger
-from typing import Optional, List
-from functools import wraps
+from typing import Optional
 
 from app.core.config import get_settings
 from app.db.session import AsyncSessionLocal
