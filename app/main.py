@@ -9,11 +9,14 @@ from app.core.config import get_settings
 from app.core.logger import setup_logging
 from app.api.router import api_router
 from app.services.watcher import watcher_engine
+from app.services.notifier import notifier
 
 settings = get_settings()
 
 # Initialize Scheduler
 scheduler = AsyncIOScheduler()
+# Track whether the Telegram polling was actually started
+_is_bot_running = False
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -21,18 +24,33 @@ async def lifespan(app: FastAPI):
     Handle application startup and shutdown events.
     - Setup logging
     - Start scheduler
-    - Database engine cleanup (handled by SQLAlchemy async engine automatically, 
-      but can be added here if explicit disposal is needed)
+    - Database engine cleanup
+    - Start Telegram Bot polling
     """
+    global _is_bot_running
+
     # Startup
     setup_logging()
     logger.info(f"Starting {settings.PROJECT_NAME}...")
     
-    # Start Scheduler
+    # 1. Start Telegram Bot polling (non-blocking)
+    try:
+        if notifier.ptb_app:
+            await notifier.ptb_app.initialize()
+            await notifier.ptb_app.start()
+            await notifier.ptb_app.updater.start_polling()
+            _is_bot_running = True
+            logger.info("Telegram interactive bot polling started.")
+    except Exception as e:
+        _is_bot_running = False
+        logger.error(f"Failed to start Telegram interactive bot: {e}")
+        logger.warning("Application will continue without interactive Telegram support.")
+    
+    # 2. Start Scheduler
     scheduler.start()
     logger.info("Background scheduler started.")
     
-    # Add Watcher Job (Run every 5 minutes)
+    # 3. Add Watcher Job (Run every 5 minutes)
     scheduler.add_job(
         watcher_engine.run_cycle,
         "interval",
@@ -45,6 +63,17 @@ async def lifespan(app: FastAPI):
     yield
     
     # Shutdown
+    # 1. Telegram Bot Shutdown (only if it actually started)
+    if _is_bot_running and notifier.ptb_app:
+        try:
+            await notifier.ptb_app.updater.stop()
+            await notifier.ptb_app.stop()
+            await notifier.ptb_app.shutdown()
+            logger.info("Telegram interactive bot shut down.")
+        except Exception as e:
+            logger.error(f"Error during Telegram bot shutdown: {e}")
+
+    # 2. Scheduler Shutdown
     scheduler.shutdown()
     logger.info("Background scheduler shut down.")
     logger.info(f"Shutting down {settings.PROJECT_NAME}...")

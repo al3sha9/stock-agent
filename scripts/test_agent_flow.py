@@ -14,41 +14,36 @@ from app.schemas.stock import WatchlistCreate
 from sqlalchemy import text
 
 async def run_test():
-    logger.info("Starting Full Analyst Agent Flow Test...")
+    logger.info("Starting Full Analyst Agent Flow Test with Technical Analysis Context...")
     
     try:
         async with AsyncSessionLocal() as db:
             # 0. Connection Check
             logger.info("Step 0: Verifying Database Connection...")
             try:
-                # Simple query to test connectivity - Wrapped in text() for SQLAlchemy 2.0
                 await db.execute(text("SELECT 1"))
                 logger.info("Database connection verified.")
             except Exception as e:
                 logger.critical(f"DATABASE CONNECTION FAILED: {e}")
-                logger.info("Ensure your DATABASE_URL is set correctly and the project is initialized in Supabase.")
                 return
 
             # 1. Setup - Ensure a test ticker exists
-            ticker = "TSLA"
+            ticker = "AAPL"
             logger.info(f"Step 1: Preparing test ticker {ticker}")
-            try:
-                item = await crud.get_watchlist_item_by_ticker(db, ticker)
-                if not item:
-                    item = await crud.create_watchlist_item(
-                        db, 
-                        WatchlistCreate(ticker=ticker, target_price=200.0, drop_trigger=10.0)
-                    )
-                    logger.info(f"Created new watchlist item for {ticker}")
-            except Exception as e:
-                if "relation \"watchlist\" does not exist" in str(e):
-                    logger.critical("DB SCHEMA MISSING: Have you run the SQL initialization in Supabase SQL Editor?")
-                    return
-                raise
+            item = await crud.get_watchlist_item_by_ticker(db, ticker)
+            if not item:
+                item = await crud.create_watchlist_item(
+                    db, 
+                    WatchlistCreate(ticker=ticker, target_price=250.0, drop_trigger=15.0)
+                )
+                logger.info(f"Created new watchlist item for {ticker}")
             
-            # 2. Mock a Trigger Event
-            logger.info("Step 2: Mocking a TriggerEvent")
-            current_price = 195.0
+            # 2. Mock a Trigger Event with Technical context
+            logger.info("Step 2: Mocking a TriggerEvent with Technical Data")
+            current_price = 190.0
+            rsi = 28.5  # Mocking an oversold condition
+            sma20 = 210.0 # Mocking a dip below SMA
+            
             event = await crud.log_trigger_event(db, item.id, current_price)
             logger.info(f"Log recorded: Event ID {event.id}")
 
@@ -59,6 +54,8 @@ async def run_test():
                 "ticker": ticker,
                 "current_price": current_price,
                 "trigger_event_id": event.id,
+                "rsi": rsi,
+                "sma20": sma20,
                 "messages": []
             }
             
@@ -67,14 +64,15 @@ async def run_test():
                     logger.info(f"--- Node '{node_name}' Completed ---")
                     if output:
                         for key, value in output.items():
-                            if key != "messages":
+                            if key == "filing_context":
+                                logger.info(f"  {key}: {str(value)[:100]}...")
+                            elif key != "messages":
                                 logger.info(f"  {key}: {value}")
                     else:
                         logger.info("  (Node returned no data)")
                 
             # 4. Final Verification
             logger.info("Step 4: Verifying DB Persistence")
-            # We use a fresh session to ensure we read the latest data committed by the agent's session
             async with AsyncSessionLocal() as verification_db:
                 updated_events = await crud.get_trigger_events(verification_db)
                 test_event = next((e for e in updated_events if e.id == event.id), None)
@@ -82,7 +80,6 @@ async def run_test():
                 if test_event and test_event.recommendation:
                     logger.success("TEST PASSED: Analysis findings saved to database.")
                     logger.info(f"Final Recommendation: {test_event.recommendation}")
-                    logger.info(f"Intrinsic Value: ${test_event.intrinsic_value}")
                 else:
                     logger.error("TEST FAILED: Findings were not saved correctly.")
                 
@@ -91,12 +88,10 @@ async def run_test():
 
 if __name__ == "__main__":
     try:
-        # Standard Python 3.7+ async entry point
         asyncio.run(run_test())
     except KeyboardInterrupt:
         logger.warning("Test manually interrupted.")
     except Exception as e:
-        # Catch lingering loop issues
         if "Event loop is closed" not in str(e):
             logger.error(f"Fatal test error: {e}")
         sys.exit(1)

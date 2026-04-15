@@ -1,9 +1,10 @@
 import asyncio
 import yfinance as yf
+import pandas as pd
 from datetime import datetime, timezone, timedelta
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from app.db.session import AsyncSessionLocal
 from app.db.crud import get_active_watchlist, get_last_trigger_event, log_trigger_event
@@ -12,37 +13,74 @@ from app.services.analyst_agent import analyst_graph
 class WatcherEngine:
     """
     Engine for monitoring stock prices and triggering alerts.
+    Now includes Technical Analysis (SMA/RSI) and "Strong Dip" triggers.
     """
 
     @staticmethod
-    async def fetch_ticker_data(ticker_symbol: str) -> Dict[str, Any]:
+    def calculate_indicators(df: pd.DataFrame) -> Dict[str, float]:
         """
-        Fetch current price and previous close from yfinance.
-        Runs in a separate thread to avoid blocking the event loop.
+        Calculate 20-day SMA and 14-day RSI.
+        """
+        if len(df) < 14:
+            return {"rsi": 50.0, "sma20": df["Close"].mean() if not df.empty else 0.0}
+
+        # 1. Calculate 20-day SMA
+        sma20 = df["Close"].rolling(window=20).mean().iloc[-1]
+        if pd.isna(sma20):
+            sma20 = df["Close"].mean()
+
+        # 2. Calculate 14-day RSI
+        delta = df["Close"].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs))
+        current_rsi = rsi.iloc[-1]
+        
+        if pd.isna(current_rsi):
+            current_rsi = 50.0
+
+        return {
+            "rsi": round(float(current_rsi), 2),
+            "sma20": round(float(sma20), 2)
+        }
+
+    async def fetch_ticker_data(self, ticker_symbol: str) -> Dict[str, Any]:
+        """
+        Fetch current price and 30-day history for technical indicators.
         """
         def _get_data():
             ticker = yf.Ticker(ticker_symbol)
-            # Fetching 'fast_info' for efficient attribute access
-            info = ticker.fast_info
+            # Fetch 1 month of history for SMA/RSI calculation
+            history = ticker.history(period="1mo")
+            
+            if history.empty:
+                return {"success": False}
+                
+            last_price = history["Close"].iloc[-1]
+            prev_close = history["Close"].iloc[-2] if len(history) > 1 else last_price
+            
+            indicators = self.calculate_indicators(history)
+            
             return {
-                "last_price": info.last_price,
-                "previous_close": info.previous_close,
+                "last_price": last_price,
+                "previous_close": prev_close,
+                "rsi": indicators["rsi"],
+                "sma20": indicators["sma20"],
+                "success": True
             }
 
         try:
-            # Wrap all yfinance property access in a thread to be 100% safe
             data = await asyncio.to_thread(_get_data)
-            return {
-                **data,
-                "success": True
-            }
+            return data
         except Exception as e:
             logger.error(f"Error fetching data for {ticker_symbol}: {e}")
             return {"success": False}
 
     async def run_cycle(self):
         """
-        Runs a single cycle of the watcher engine.
+        Runs a single cycle of the watcher engine with technical analysis triggers.
         """
         logger.info("Watcher cycle started.")
         
@@ -59,21 +97,26 @@ class WatcherEngine:
 
             for item in active_items:
                 try:
-                    # 1. Fetch latest data
+                    # 1. Fetch latest data + indicators
                     data = await self.fetch_ticker_data(item.ticker)
-                    if not data["success"]:
+                    if not data.get("success"):
                         continue
 
                     current_price = data["last_price"]
                     prev_close = data["previous_close"]
+                    rsi = data["rsi"]
+                    sma20 = data["sma20"]
+                    
                     drop_from_close = prev_close - current_price
 
                     # 2. Check Triggers
+                    # A) Target Price Hit
                     price_hit = current_price <= item.target_price
-                    drop_hit = drop_from_close >= item.drop_trigger
-
-                    if price_hit or drop_hit:
-                        reason = "Target Hit" if price_hit else f"Drop Hit ({drop_from_close:.2f})"
+                    # B) "Strong Dip" (RSI < 30 and Price < 95% of SMA20)
+                    strong_dip_hit = (rsi < 30) and (current_price < (sma20 * 0.95))
+                    
+                    if price_hit or strong_dip_hit:
+                        reason = "Target Hit" if price_hit else f"Strong Dip (RSI:{rsi})"
                         logger.warning(f"THRESHOLD HIT | {item.ticker} | Price: {current_price:.2f} | Reason: {reason}")
 
                         # 3. Cooldown Check
@@ -93,14 +136,16 @@ class WatcherEngine:
                         event = await log_trigger_event(db, item.id, current_price)
                         logger.success(f"Log recorded for {item.ticker}")
 
-                        # 5. Trigger Analyst Agent (LangGraph)
+                        # 5. Trigger Analyst Agent (LangGraph) with Technical context
                         asyncio.create_task(analyst_graph.ainvoke({
                             "ticker": item.ticker,
                             "current_price": current_price,
                             "trigger_event_id": event.id,
+                            "rsi": rsi,
+                            "sma20": sma20,
                             "messages": []
                         }))
-                        logger.info(f"Analyst Agent triggered for {item.ticker}")
+                        logger.info(f"Analyst Agent triggered for {item.ticker} with TA context.")
 
                 except Exception as e:
                     logger.error(f"Unexpected error processing {item.ticker}: {e}")

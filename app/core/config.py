@@ -34,6 +34,15 @@ class Settings(BaseSettings):
     # LangChain / Google Gemini (for LangGraph)
     GOOGLE_API_KEY: Optional[str] = None
     
+    # Financial Modeling Prep (for SEC data)
+    FMP_API_KEY: Optional[str] = None
+
+    # Telegram Bot
+    TELEGRAM_BOT_TOKEN: Optional[str] = None
+    TELEGRAM_CHAT_ID: Optional[str] = None
+    # Optional Cloudflare reverse proxy for Telegram API
+    TELEGRAM_BASE_URL: Optional[str] = None
+    
     model_config = SettingsConfigDict(
         env_file=".env",
         case_sensitive=True,

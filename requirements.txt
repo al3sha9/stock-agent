@@ -9,3 +9,7 @@ apscheduler
 langgraph
 langchain-google-genai
 python-dotenv
+httpx
+beautifulsoup4
+python-telegram-bot
+pandas
